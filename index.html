@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Cam + Gemini</title>
+<style>
+  :root { --bg:#fff0f4; --card:#fff; --pink:#d63384; --text:#2b2b2b; --muted:#777; --line:#f3c6d6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1d1418; --card:#2a1d23; --pink:#ff7aa8; --text:#f1e6ea; --muted:#b39aa4; --line:#4a3039; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font-family:system-ui,Arial,sans-serif; }
+  .wrap { max-width:520px; margin:0 auto; display:flex; flex-direction:column; gap:12px; }
+  h1 { color:var(--pink); font-size:1.3rem; margin:0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
+  label { display:block; font-size:.8rem; color:var(--muted); margin:8px 0 4px; }
+  input, textarea { width:100%; padding:10px; border-radius:10px; border:1px solid var(--line); background:transparent; color:var(--text); font-size:.95rem; }
+  textarea { min-height:70px; resize:vertical; }
+  button { width:100%; padding:14px; border:0; border-radius:12px; background:var(--pink); color:#fff; font-size:1rem; font-weight:600; }
+  button:disabled { opacity:.5; }
+  .row { display:flex; align-items:center; gap:8px; }
+  .dot { width:12px; height:12px; border-radius:50%; background:#d33; }
+  .dot.on { background:#2ca44f; }
+  img { width:100%; border-radius:10px; display:none; margin-top:8px; }
+  #log { font-family:ui-monospace,monospace; font-size:.78rem; white-space:pre-wrap; max-height:180px; overflow:auto; color:var(--muted); }
+  #answer { margin-top:8px; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ESP32 Cam &rarr; Gemini</h1>
+
+  <div class="card">
+    <div class="row"><div id="dot" class="dot"></div><span id="state">Chưa kết nối</span></div>
+    <button id="btnConnect" style="margin-top:10px">Kết nối ESP32 (BLE)</button>
+  </div>
+
+  <div class="card">
+    <label>Gemini API key (lưu trong máy này, không gửi đi đâu ngoài Google)</label>
+    <input id="key" type="password" placeholder="AIza...">
+    <label>Model</label>
+    <input id="model" value="gemini-3.7-flash">
+    <label>Câu hỏi gửi kèm ảnh</label>
+    <textarea id="prompt">Mô tả ngắn gọn bằng tiếng Việt những gì có trong ảnh. Tối đa 200 ký tự, viết thành một đoạn văn, không dùng markdown hay ký hiệu đặc biệt.</textarea>
+  </div>
+
+  <div class="card">
+    <img id="pic" alt="Ảnh từ ESP32">
+    <div id="answer"></div>
+  </div>
+
+  <div class="card"><div id="log"></div></div>
+</div>
+
+<script>
+const SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // ghi xuống ESP
+const TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // ESP gửi lên (notify)
+
+const $ = id => document.getElementById(id);
+let device, rxChar, txChar;
+let chunks = [], expected = 0, got = 0;
+
+// ---- lưu cài đặt ----
+$('key').value = localStorage.getItem('gkey') || '';
+$('model').value = localStorage.getItem('gmodel') || $('model').value;
+$('prompt').value = localStorage.getItem('gprompt') || $('prompt').value;
+['key','model','prompt'].forEach(id => $(id).addEventListener('change', () => {
+  localStorage.setItem({key:'gkey',model:'gmodel',prompt:'gprompt'}[id], $(id).value);
+}));
+
+function log(m) {
+  const el = $('log');
+  el.textContent += new Date().toLocaleTimeString() + '  ' + m + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function setState(on, text) {
+  $('dot').classList.toggle('on', on);
+  $('state').textContent = text;
+}
+
+// ---- BLE ----
+$('btnConnect').onclick = async () => {
+  if (!navigator.bluetooth) {
+    alert('Trình duyệt này không hỗ trợ Web Bluetooth. Hãy dùng Chrome trên Android (iPhone: dùng app Bluefy).');
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'ESP32-CAM' }],
+      optionalServices: [SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected', () => {
+      setState(false, 'Mất kết nối'); log('Mất kết nối BLE');
+    });
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    rxChar = await svc.getCharacteristic(RX_UUID);
+    txChar = await svc.getCharacteristic(TX_UUID);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', onNotify);
+    setState(true, 'Đã kết nối: ' + device.name);
+    log('Đã kết nối. Bấm nút BOOT trên ESP32 để chụp.');
+  } catch (e) {
+    log('Lỗi kết nối: ' + e.message);
+  }
+};
+
+function onNotify(ev) {
+  const dv = ev.target.value;
+  const t = dv.getUint8(0);
+  if (t === 0x01) {
+    expected = dv.getUint32(1, true);
+    chunks = []; got = 0;
+    log('Đang nhận ảnh (' + expected + ' byte)...');
+  } else if (t === 0x02) {
+    const part = new Uint8Array(new Uint8Array(dv.buffer, dv.byteOffset + 1, dv.byteLength - 1));
+    chunks.push(part); got += part.length;
+  } else if (t === 0x03) {
+    log('Nhận xong ' + got + '/' + expected + ' byte');
+    const blob = new Blob(chunks, { type: 'image/jpeg' });
+    $('pic').src = URL.createObjectURL(blob);
+    $('pic').style.display = 'block';
+    $('answer').textContent = 'Đang hỏi Gemini...';
+    if (got !== expected) log('Cảnh báo: thiếu dữ liệu ảnh');
+    askGemini(blob);
+  }
+}
+
+async function bleWrite(bytes) {
+  if (rxChar.writeValueWithResponse) await rxChar.writeValueWithResponse(bytes);
+  else await rxChar.writeValue(bytes);
+}
+async function sendStatus(text) {
+  const enc = new TextEncoder().encode(toAscii(text).slice(0, 24));
+  const p = new Uint8Array(enc.length + 1); p[0] = 4; p.set(enc, 1);
+  await bleWrite(p);
+}
+async function sendResult(text) {
+  const enc = new TextEncoder().encode(text);
+  await bleWrite(Uint8Array.of(1));
+  for (let i = 0; i < enc.length; i += 100) {
+    const part = enc.slice(i, i + 100);
+    const p = new Uint8Array(part.length + 1); p[0] = 2; p.set(part, 1);
+    await bleWrite(p);
+  }
+  await bleWrite(Uint8Array.of(3));
+}
+
+// Màn hình ESP32 không có font tiếng Việt -> bỏ dấu, bỏ ký tự lạ
+function toAscii(s) {
+  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd').replace(/Đ/g, 'D')
+    .replace(/[*#_`>~]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[^\x20-\x7E]/g, '')
+    .trim();
+}
+
+function blobToB64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result.split(',')[1]);
+    r.onerror = rej;
+    r.readAsDataURL(blob);
+  });
+}
+
+// ---- Gemini ----
+async function askGemini(blob) {
+  const key = $('key').value.trim();
+  const model = $('model').value.trim();
+  if (!key) {
+    const msg = 'Chua nhap API key tren dien thoai';
+    $('answer').textContent = msg; await sendResult(msg); return;
+  }
+  try {
+    await sendStatus('Dang hoi Gemini...');
+    const b64 = await blobToB64(blob);
+    const r = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { text: $('prompt').value },
+            { inline_data: { mime_type: 'image/jpeg', data: b64 } }
+          ]}]
+        })
+      }
+    );
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error?.message || ('HTTP ' + r.status));
+    const raw = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+    if (!raw) throw new Error('Gemini khong tra ve noi dung');
+    $('answer').textContent = raw;
+    log('Gemini: ' + raw);
+    await sendResult(toAscii(raw).slice(0, 280));
+  } catch (e) {
+    log('Lỗi Gemini: ' + e.message);
+    $('answer').textContent = 'Lỗi: ' + e.message;
+    try { await sendResult(toAscii('Loi: ' + e.message).slice(0, 200)); } catch (_) {}
+  }
+}
+</script>
+</body>
+</html>
