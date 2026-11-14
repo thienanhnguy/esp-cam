@@ -168,36 +168,69 @@ function blobToB64(blob) {
 }
 
 // ---- Gemini ----
+const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function callGemini(model, key, b64) {
+  const r = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { text: $('prompt').value },
+          { inline_data: { mime_type: 'image/jpeg', data: b64 } }
+        ]}]
+      })
+    }
+  );
+  let j = {};
+  try { j = await r.json(); } catch (_) {}
+  if (!r.ok) {
+    const err = new Error(j.error?.message || ('HTTP ' + r.status));
+    const msg = (err.message || '').toLowerCase();
+    err.retry = [429, 500, 503, 504].includes(r.status) || msg.includes('high demand') || msg.includes('overloaded');
+    throw err;
+  }
+  const raw = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
+  if (!raw) throw new Error('Gemini khong tra ve noi dung');
+  return raw;
+}
+
 async function askGemini(blob) {
   const key = $('key').value.trim();
-  const model = $('model').value.trim();
+  const mainModel = $('model').value.trim();
   if (!key) {
     const msg = 'Chua nhap API key tren dien thoai';
     $('answer').textContent = msg; await sendResult(msg); return;
   }
+  const models = [mainModel, ...FALLBACK_MODELS.filter(m => m !== mainModel)];
   try {
     await sendStatus('Dang hoi Gemini...');
     const b64 = await blobToB64(blob);
-    const r = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({
-          contents: [{ parts: [
-            { text: $('prompt').value },
-            { inline_data: { mime_type: 'image/jpeg', data: b64 } }
-          ]}]
-        })
+    let lastErr = null;
+    for (let round = 0; round < 3; round++) {
+      for (const m of models) {
+        try {
+          log('Hoi Gemini (' + m + ')...');
+          const raw = await callGemini(m, key, b64);
+          $('answer').textContent = raw;
+          log('Gemini: ' + raw);
+          await sendResult(toAscii(raw).slice(0, 280));
+          return;
+        } catch (e) {
+          lastErr = e;
+          log('Loi (' + m + '): ' + e.message);
+          if (!e.retry) throw e;   // loi khac (sai key,...) thi dung luon
+        }
       }
-    );
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error?.message || ('HTTP ' + r.status));
-    const raw = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join('');
-    if (!raw) throw new Error('Gemini khong tra ve noi dung');
-    $('answer').textContent = raw;
-    log('Gemini: ' + raw);
-    await sendResult(toAscii(raw).slice(0, 280));
+      if (round < 2) {
+        await sendStatus('Gemini ban, thu lai...');
+        await sleep(2500);
+      }
+    }
+    throw lastErr || new Error('Gemini khong phan hoi');
   } catch (e) {
     log('Lỗi Gemini: ' + e.message);
     $('answer').textContent = 'Lỗi: ' + e.message;
