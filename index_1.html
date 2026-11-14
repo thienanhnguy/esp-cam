@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 Cam + Gemini</title>
+<title>ThienanhA3 - ESP32 Cam + Gemini</title>
 <style>
   :root { --bg:#fff0f4; --card:#fff; --pink:#d63384; --text:#2b2b2b; --muted:#777; --line:#f3c6d6; }
   @media (prefers-color-scheme: dark) {
@@ -12,6 +12,11 @@
   * { box-sizing:border-box; }
   body { margin:0; padding:16px; background:var(--bg); color:var(--text); font-family:system-ui,Arial,sans-serif; }
   .wrap { max-width:520px; margin:0 auto; display:flex; flex-direction:column; gap:12px; }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .logo { width:46px; height:46px; flex:none; filter:drop-shadow(0 3px 6px rgba(214,51,132,.35)); }
+  .brand-text { font-size:1.6rem; font-weight:800; color:var(--pink); letter-spacing:.3px; line-height:1; }
+  .brand-text b { color:var(--text); }
+  .ver { text-align:center; font-size:.72rem; color:var(--muted); padding:4px 0 12px; }
   h1 { color:var(--pink); font-size:1.3rem; margin:0; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
   label { display:block; font-size:.8rem; color:var(--muted); margin:8px 0 4px; }
@@ -29,6 +34,14 @@
 </head>
 <body>
 <div class="wrap">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 48 48" role="img" aria-label="ThienanhA3">
+      <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff7aa8"/><stop offset="1" stop-color="#d63384"/></linearGradient></defs>
+      <rect width="48" height="48" rx="12" fill="url(#lg)"/>
+      <text x="24" y="31" text-anchor="middle" font-family="Arial,sans-serif" font-weight="700" font-size="20" fill="#ffffff">A3</text>
+    </svg>
+    <div class="brand-text">Thienanh<b>A3</b></div>
+  </div>
   <h1>ESP32 Cam &rarr; Gemini</h1>
 
   <div class="card">
@@ -52,6 +65,7 @@
   </div>
 
   <div class="card"><div id="log"></div></div>
+  <div class="ver">ThienanhA3 &middot; phiên bản 3</div>
 </div>
 
 <script>
